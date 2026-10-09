@@ -1,11 +1,27 @@
 {
   "prompt": "Do not perform any work. Reply with exactly: OK",
+  "logFile": "keepalive.log",
   "maxSessions": 4,
   "idleTimeout": 30,
   "autoTune": false,
   "models": {
-    "anthropic-sdk/claude-opus-*": { "interval": 50, "duration": 240, "sessions": "top" },
-    "commandcode/deepseek/*": { "interval": 25, "duration": 240, "sessions": "top" },
-    "openai/gpt-*": { "interval": 25, "duration": 240, "sessions": "all", "wake": false }
+    "anthropic-sdk/claude-opus-*": {
+      "enabled": true,
+      "maxPrompts": 5,
+      "interval": 50,
+      "sessions": "top"
+    },
+    "commandcode/deepseek/*": {
+      "enabled": true,
+      "maxPrompts": 10,
+      "interval": 25,
+      "sessions": "top"
+    },
+    "openai/gpt-*": {
+      "enabled": false,
+      "maxPrompts": 10,
+      "interval": 25,
+      "sessions": "all"
+    }
   }
 }

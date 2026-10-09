@@ -1,4 +1,4 @@
-import { writeFileSync, mkdtempSync } from "node:fs"
+import { writeFileSync, readFileSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -23,12 +23,10 @@ async function load(config) {
 }
 
 async function mount(config, opts = {}) {
-  const { setup, file } = await load(config)
+  const { setup, file } = await load({ logFile: "keepalive.log", ...config })
   const hooks = {}
   const calls = { generate: [], prompt: [] }
-  const logs = []
-  const origError = console.error
-  console.error = (...a) => logs.push(a.join(" "))
+  const logs = () => { try { return readFileSync(path.join(path.dirname(file), "keepalive.log"), "utf8") } catch { return "" } }
   const ctx = {
     options: { config: opts.file ?? file },
     session: {
@@ -42,24 +40,27 @@ async function mount(config, opts = {}) {
     },
   }
   const cleanup = setup(ctx)
-  return { hooks, calls, logs, cleanup: async () => { await (await cleanup)(); console.error = origError } }
+  return { file, hooks, calls, logs, cleanup: async () => { await (await cleanup)() } }
 }
 
-const arm = (hooks, sessionID, model, parentID) =>
+const arm = (hooks, sessionID, model) =>
   hooks.context({ sessionID, model: { providerID: model[0], id: model[1] } })
 
 // --- config validation -------------------------------------------------------
 
 {
-  const base = { prompt: "P", models: { "*": { interval: 1, duration: 1 } } }
   for (const [name, cfg] of [
     ["no prompt", { models: {} }],
-    ["bad sessions", { prompt: "P", models: { "*": { interval: 1, duration: 1, sessions: "x" } } }],
-    ["bad interval", { prompt: "P", models: { "*": { interval: 0, duration: 1 } } }],
+    ["bad sessions", { prompt: "P", models: { "*": { maxPrompts: 1, interval: 1, sessions: "x" } } }],
+    ["bad interval", { prompt: "P", models: { "*": { maxPrompts: 1, interval: 0 } } }],
+    ["no maxPrompts", { prompt: "P", models: { "*": { interval: 1 } } }],
+    ["fractional maxPrompts", { prompt: "P", models: { "*": { maxPrompts: 1.5, interval: 1 } } }],
+    ["zero maxPrompts", { prompt: "P", models: { "*": { maxPrompts: 0, interval: 1 } } }],
     ["bad maxSessions", { prompt: "P", maxSessions: 1.5, models: {} }],
     ["bad idleTimeout", { prompt: "P", idleTimeout: -1, models: {} }],
     ["bad autoTune", { prompt: "P", autoTune: "yes", models: {} }],
-    ["bad wake", { prompt: "P", models: { "*": { interval: 1, duration: 1, wake: "x" } } }],
+    ["bad wake", { prompt: "P", models: { "*": { maxPrompts: 1, interval: 1, wake: "x" } } }],
+    ["bad enabled", { prompt: "P", models: { "*": { maxPrompts: 1, interval: 1, enabled: "x" } } }],
   ]) {
     let threw = false
     try { await mount(cfg) } catch { threw = true }
@@ -70,7 +71,7 @@ const arm = (hooks, sessionID, model, parentID) =>
 // --- sessions filter ---------------------------------------------------------
 
 async function sessionsCase(setting, parentID) {
-  const m = await mount({ prompt: "P", models: { "*": { interval: 0.002, duration: 60, sessions: setting } } }, { parentID })
+  const m = await mount({ prompt: "P", models: { "*": { maxPrompts: 100, interval: 0.002, sessions: setting } } }, { parentID })
   await arm(m.hooks, "s1", ["p", "m"])
   await sleep(200)
   await m.cleanup()
@@ -83,21 +84,67 @@ check("sessions subagents warms child", await sessionsCase("subagents", "ses_par
 check("sessions all warms top", await sessionsCase("all", undefined))
 check("sessions all warms child", await sessionsCase("all", "ses_parent"))
 
+// --- enabled toggle ----------------------------------------------------------
+
+{
+  const m = await mount({ prompt: "P", models: { "*": { maxPrompts: 100, interval: 0.002, enabled: false } } })
+  await arm(m.hooks, "s1", ["p", "m"])
+  await sleep(200)
+  check("enabled false never warms", m.calls.generate.length === 0)
+  await m.cleanup()
+}
+
+// --- maxPrompts caps, identically for wake and warm --------------------------
+
+async function capCase(wake) {
+  const m = await mount({ prompt: "P", models: { "*": { maxPrompts: 3, interval: 0.002, wake } } })
+  await arm(m.hooks, "s1", ["p", "m"])
+  await sleep(600)
+  const n = wake ? m.calls.prompt.length : m.calls.generate.length
+  await m.cleanup()
+  return n
+}
+check("maxPrompts caps warm mode at 3", (await capCase(false)) === 3, String(await capCase(false)))
+check("maxPrompts caps wake mode at 3", (await capCase(true)) === 3, String(await capCase(true)))
+
+// --- spell reset -------------------------------------------------------------
+
+{
+  const m = await mount({ prompt: "P", models: { "*": { maxPrompts: 1, interval: 0.002 } } })
+  await arm(m.hooks, "s1", ["p", "m"])
+  await sleep(200)
+  const afterCap = m.calls.generate.length
+  // A plugin wake prompt (tagged) must NOT start a new spell...
+  m.hooks.prompt({ sessionID: "s1", metadata: { keepalive: true } })
+  await arm(m.hooks, "s1", ["p", "m"])
+  await sleep(200)
+  const afterTagged = m.calls.generate.length
+  // ...but a genuine user prompt must.
+  m.hooks.prompt({ sessionID: "s1", metadata: {} })
+  await arm(m.hooks, "s1", ["p", "m"])
+  await sleep(200)
+  const afterGenuine = m.calls.generate.length
+  await m.cleanup()
+  check("maxPrompts stops at 1", afterCap === 1, String(afterCap))
+  check("tagged wake does not reset the spell", afterTagged === 1, String(afterTagged))
+  check("genuine prompt resets the spell", afterGenuine === 2, String(afterGenuine))
+}
+
 // --- per-rule prompt and wake ------------------------------------------------
 
 {
-  const m = await mount({ prompt: "GLOBAL", models: { "*": { interval: 0.002, duration: 60, prompt: "RULE" } } })
+  const m = await mount({ prompt: "GLOBAL", models: { "*": { maxPrompts: 100, interval: 0.002, prompt: "RULE" } } })
   await arm(m.hooks, "s1", ["p", "m"])
   await sleep(200)
   check("per-rule prompt", m.calls.generate[0]?.prompt === "RULE", JSON.stringify(m.calls.generate[0]))
   await m.cleanup()
 }
 {
-  const m = await mount({ prompt: "GLOBAL", models: { "*": { interval: 0.002, duration: 60, wake: true } } })
+  const m = await mount({ prompt: "GLOBAL", models: { "*": { maxPrompts: 100, interval: 0.002, wake: true } } })
   await arm(m.hooks, "s1", ["p", "m"])
   await sleep(200)
   check("wake uses prompt", m.calls.prompt.length > 0 && m.calls.generate.length === 0)
-  check("wake sends text", m.calls.prompt[0]?.text === "GLOBAL")
+  check("wake sends text and metadata", m.calls.prompt[0]?.text === "GLOBAL" && m.calls.prompt[0]?.metadata?.keepalive === true)
   await m.cleanup()
 }
 
@@ -105,18 +152,18 @@ check("sessions all warms child", await sessionsCase("all", "ses_parent"))
 
 {
   const m = await mount(
-    { prompt: "P", idleTimeout: 5, models: { "*": { interval: 0.002, duration: 60 } } },
+    { prompt: "P", idleTimeout: 5, models: { "*": { maxPrompts: 100, interval: 0.002 } } },
     { get: () => ({ time: { viewed: Date.now() - 10 * 60000 } }) },
   )
   await arm(m.hooks, "s1", ["p", "m"])
   await sleep(200)
   check("idle timeout skips unseen session", m.calls.generate.length === 0)
-  check("idle timeout logs", m.logs.some((l) => l.includes("unviewed")))
+  check("idle timeout logs", m.logs().includes("unviewed"))
   await m.cleanup()
 }
 {
   const m = await mount(
-    { prompt: "P", idleTimeout: 5, models: { "*": { interval: 0.002, duration: 60 } } },
+    { prompt: "P", idleTimeout: 5, models: { "*": { maxPrompts: 100, interval: 0.002 } } },
     { get: () => ({ time: { viewed: Date.now() } }) },
   )
   await arm(m.hooks, "s1", ["p", "m"])
@@ -128,7 +175,7 @@ check("sessions all warms child", await sessionsCase("all", "ses_parent"))
 // --- max sessions ------------------------------------------------------------
 
 {
-  const m = await mount({ prompt: "P", maxSessions: 2, models: { "*": { interval: 0.002, duration: 60 } } })
+  const m = await mount({ prompt: "P", maxSessions: 2, models: { "*": { maxPrompts: 100, interval: 0.002 } } })
   await arm(m.hooks, "s1", ["p", "m"])
   await sleep(20)
   await arm(m.hooks, "s2", ["p", "m"])
@@ -146,14 +193,14 @@ check("sessions all warms child", await sessionsCase("all", "ses_parent"))
 async function tuneCase(autoTune) {
   let write = 0
   const m = await mount(
-    { prompt: "P", autoTune, models: { "*": { interval: 0.002, duration: 60 } } },
+    { prompt: "P", autoTune, models: { "*": { maxPrompts: 1000, interval: 0.002 } } },
     {
       get: () => ({ time: { viewed: Date.now() }, tokens: { cache: { read: 0, write } } }),
       onGenerate: () => { write += 1000 },
     },
   )
   await arm(m.hooks, "s1", ["p", "m"])
-  await sleep(1500)
+  await sleep(1000)
   await m.cleanup()
   return m.calls.generate.length
 }
@@ -167,23 +214,44 @@ check("autoTune shortens interval", on > off, `off=${off} on=${on}`)
 {
   let write = 0
   const m = await mount(
-    { prompt: "P", models: { "*": { interval: 0.002, duration: 60 } } },
+    { prompt: "P", models: { "*": { maxPrompts: 100, interval: 0.002 } } },
     { get: () => ({ time: { viewed: Date.now() }, tokens: { cache: { read: 0, write } } }), onGenerate: () => { write += 500 } },
   )
   await arm(m.hooks, "s1", ["p", "m"])
   await sleep(200)
-  check("reports a warm with its cache delta", m.logs.some((l) => l.includes("warmed s1") && l.includes("write=")), m.logs.join(" | "))
+  check("reports a warm with its cache delta", m.logs().includes("warmed s1") && m.logs().includes("write="), m.logs())
+  await m.cleanup()
+}
+
+// --- live config reload ------------------------------------------------------
+
+{
+  const m = await mount({ prompt: "P", models: { "*": { maxPrompts: 100, interval: 1000 } } })
+  await arm(m.hooks, "s1", ["p", "m"])
+  await sleep(100)
+  check("long interval does not warm", m.calls.generate.length === 0)
+  writeFileSync(m.file, JSON.stringify({ prompt: "P", logFile: "keepalive.log", models: { "*": { maxPrompts: 100, interval: 0.002 } } }))
+  await sleep(600)
+  check("saving the config applies without a restart", m.calls.generate.length > 0)
+  check("config reload logged", m.logs().includes("config reloaded"))
+  await m.cleanup()
+}
+{
+  const m = await mount({ prompt: "P", models: { "*": { maxPrompts: 100, interval: 0.002 } } })
+  await arm(m.hooks, "s1", ["p", "m"])
+  writeFileSync(m.file, "{ this is not json")
+  await sleep(400)
+  check("invalid reload keeps the previous settings", m.calls.generate.length > 0 && m.logs().includes("reload failed"))
   await m.cleanup()
 }
 
 // --- http prefix alignment ---------------------------------------------------
 
-async function httpCase(primary, generate, want, opts = {}) {
-  const m = await mount({ prompt: "P", models: { "*": { interval: 1000, duration: 60 } } }, opts)
+async function httpCase(primary, generate, opts = {}) {
+  const m = await mount({ prompt: "P", models: { "*": { maxPrompts: 100, interval: 1000 } } }, opts)
   const sid = opts.sessionID ?? "s1"
-  await arm(m.hooks, sid, ["p", "m"], opts.parentID)
-  const primaryEvent = { sessionID: sid, kind: "primary", request: req(primary) }
-  await m.hooks["http.request"](primaryEvent)
+  await arm(m.hooks, sid, ["p", "m"])
+  await m.hooks["http.request"]({ sessionID: sid, kind: "primary", request: req(primary) })
   const genEvent = { sessionID: sid, kind: "generate", request: req(generate) }
   await m.hooks["http.request"](genEvent)
   const got = JSON.parse(await genEvent.request.text())
@@ -198,28 +266,28 @@ function same(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
 {
   const p = { model: "c", system: [{ text: "cc1" }, { text: "cc-prompt" }], messages: [{ role: "user", content: "hi" }] }
   const g = { model: "c", system: [{ text: "cc1" }, { text: "default-prompt" }], messages: [{ role: "user", content: "hi" }, { role: "user", content: "warm" }] }
-  const got = await httpCase(p, g, null)
+  const got = await httpCase(p, g)
   check("anthropic system realigned", same(got.system, p.system), JSON.stringify(got.system))
   check("anthropic messages untouched", same(got.messages, g.messages))
 }
 {
   const p = { instructions: "primary-instructions", input: [{ role: "user", content: "hi" }] }
   const g = { instructions: "generate-instructions", input: [{ role: "user", content: "hi" }, { role: "user", content: "warm" }] }
-  const got = await httpCase(p, g, null)
+  const got = await httpCase(p, g)
   check("responses instructions realigned", got.instructions === p.instructions)
   check("responses input untouched", same(got.input, g.input))
 }
 {
   const p = { messages: [{ role: "system", content: "primary-sys" }, { role: "user", content: "hi" }] }
   const g = { messages: [{ role: "system", content: "gen-sys" }, { role: "user", content: "hi" }, { role: "user", content: "warm" }] }
-  const got = await httpCase(p, g, null)
+  const got = await httpCase(p, g)
   check("chat system message realigned", got.messages[0].content === "primary-sys")
   check("chat history preserved", same(got.messages.slice(1), g.messages.slice(1)))
 }
 {
   const p = { instructions: "same", input: [{ role: "user", content: "hi" }] }
   const g = { instructions: "same", input: [{ role: "user", content: "hi" }, { role: "user", content: "warm" }] }
-  const got = await httpCase(p, g, null)
+  const got = await httpCase(p, g)
   check("identical prefix is a no-op", same(got, g))
 }
 
