@@ -1,7 +1,11 @@
 {
   "prompt": "Do not perform any work. Reply with exactly: OK",
+  "maxSessions": 4,
+  "idleTimeout": 30,
+  "autoTune": false,
   "models": {
-    "anthropic/claude-opus-*": { "interval": 50, "duration": 240, "sessions": "top" },
-    "openai/gpt-*": { "interval": 25, "duration": 240, "sessions": "all" }
+    "anthropic-sdk/claude-opus-*": { "interval": 50, "duration": 240, "sessions": "top" },
+    "commandcode/deepseek/*": { "interval": 25, "duration": 240, "sessions": "top" },
+    "openai/gpt-*": { "interval": 25, "duration": 240, "sessions": "all", "wake": false }
   }
 }
