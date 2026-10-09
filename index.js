@@ -11,6 +11,9 @@
 //   duration - minutes of warming after the session's last real request
 // `prompt` is sent on every warm.
 //
+// Warming of a session stops at the end of `duration`, or earlier once the session is
+// archived or removed.
+//
 // Mechanism: the `context` hook sees every real agent-loop request with its session and
 // model, which (re)arms a timer for that session. A warm is a transient
 // `session.generate`, so it does not touch history. Child (subagent) sessions are never
@@ -53,6 +56,16 @@ export default {
     const arm = (sessionID, rule, lastReal) => {
       const timer = setTimeout(async () => {
         if (Date.now() + rule.interval > lastReal + rule.duration) return stop(sessionID)
+        // A removed or archived session is finished with; stop rather than ping it until the
+        // duration window runs out. A failed lookup is read as removed.
+        let info
+        try {
+          info = await ctx.session.get({ sessionID })
+        } catch (error) {
+          console.error(`keepalive: ${sessionID} not found, no longer warming it:`, error)
+          return stop(sessionID)
+        }
+        if (info.time.archived) return stop(sessionID)
         try {
           await ctx.session.generate({ sessionID, prompt: config.prompt })
         } catch (error) {

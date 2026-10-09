@@ -67,6 +67,9 @@ and (re)arms a timer for that session. When the timer fires, the plugin calls
 prompt, tools and history and appends the prompt transiently, so it shares the cached
 prefix and adds nothing to the session history. Warms do not reset their own timer, and
 subagent (child) sessions are never warmed; the parent is the one whose cache goes cold.
+Before each warm the plugin looks the session up and stops warming it if it was archived or
+removed, so finished sessions are not pinged until `duration` runs out. Closing a TUI does not
+archive a session, so an idle but unarchived session is still warmed until `duration` ends.
 
 ## Caveats
 
