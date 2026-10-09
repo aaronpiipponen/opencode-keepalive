@@ -9,6 +9,7 @@
 // a `provider/model` glob (`*` wildcard, first match wins) to
 //   interval - minutes of silence before each warm, set just under the cache TTL
 //   duration - minutes of warming after the session's last real request
+//   sessions - which sessions the rule warms: "top" (default), "subagents" or "all"
 // `prompt` is sent on every warm.
 //
 // Warming of a session stops at the end of `duration`, or earlier once the session is
@@ -16,14 +17,15 @@
 //
 // Mechanism: the `context` hook sees every real agent-loop request with its session and
 // model, which (re)arms a timer for that session. A warm is a transient
-// `session.generate`, so it does not touch history. Child (subagent) sessions are never
-// warmed; the parent is the one whose cache goes cold.
+// `session.generate`, so it does not touch history. A session counts as a subagent when it
+// has a parent session.
 
 import { readFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const MINUTE = 60_000
+const SESSION_KINDS = ["top", "subagents", "all"]
 
 function loadConfig(file) {
   const raw = JSON.parse(readFileSync(file, "utf8"))
@@ -33,7 +35,9 @@ function loadConfig(file) {
       if (!(rule?.[key] > 0)) throw new Error(`${file}: models["${pattern}"].${key} must be a positive number of minutes`)
     }
     const source = pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")
-    return { pattern, regex: new RegExp(`^${source}$`), interval: rule.interval * MINUTE, duration: rule.duration * MINUTE }
+    const sessions = rule.sessions ?? "top"
+    if (!SESSION_KINDS.includes(sessions)) throw new Error(`${file}: models["${pattern}"].sessions must be one of ${SESSION_KINDS.join(", ")}`)
+    return { pattern, regex: new RegExp(`^${source}$`), interval: rule.interval * MINUTE, duration: rule.duration * MINUTE, sessions }
   })
   return { prompt: raw.prompt, rules }
 }
@@ -81,7 +85,7 @@ export default {
       const rule = config.rules.find((r) => r.regex.test(`${event.model.providerID}/${event.model.id}`))
       if (!rule) return stop(event.sessionID)
       if (!isChild.has(event.sessionID)) isChild.set(event.sessionID, Boolean((await ctx.session.get({ sessionID: event.sessionID })).parentID))
-      if (isChild.get(event.sessionID)) return
+      if (rule.sessions !== "all" && isChild.get(event.sessionID) !== (rule.sessions === "subagents")) return
       arm(event.sessionID, rule, Date.now())
     })
 

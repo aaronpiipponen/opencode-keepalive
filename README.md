@@ -42,8 +42,8 @@ on a missing or invalid config rather than guessing defaults.
 {
   "prompt": "Do not perform any work. Reply with exactly: OK",
   "models": {
-    "anthropic/claude-opus-*": { "interval": 50, "duration": 240 },
-    "openai/gpt-*": { "interval": 25, "duration": 240 }
+    "anthropic/claude-opus-*": { "interval": 50, "duration": 240, "sessions": "top" },
+    "openai/gpt-*": { "interval": 25, "duration": 240, "sessions": "all" }
   }
 }
 ```
@@ -55,6 +55,9 @@ on a missing or invalid config rather than guessing defaults.
     cache TTL.
   - `duration`: minutes of warming after the session's last real request. Make it longer
     than your longest expected subagent run; warming stops when it runs out.
+  - `sessions`: which sessions the rule warms. `"top"` (default) warms only top-level
+    sessions, `"subagents"` only subagent (child) sessions, `"all"` both kinds. A session
+    is a subagent when it has a parent session.
 
 Provider IDs are whatever your OpenCode setup uses (`opencode models` lists
 `provider/model` pairs).
@@ -65,8 +68,9 @@ A `context` session hook sees every real agent-loop request with its session and
 and (re)arms a timer for that session. When the timer fires, the plugin calls
 `session.generate` with the keepalive prompt. That request reuses the session's system
 prompt, tools and history and appends the prompt transiently, so it shares the cached
-prefix and adds nothing to the session history. Warms do not reset their own timer, and
-subagent (child) sessions are never warmed; the parent is the one whose cache goes cold.
+prefix and adds nothing to the session history. Warms do not reset their own timer. Which
+sessions are eligible depends on the rule's `sessions` setting; `"top"` is usually what you
+want, since the orchestrator is the one whose cache goes cold while a subagent works.
 Before each warm the plugin looks the session up and stops warming it if it was archived or
 removed, so finished sessions are not pinged until `duration` runs out. Closing a TUI does not
 archive a session, so an idle but unarchived session is still warmed until `duration` ends.

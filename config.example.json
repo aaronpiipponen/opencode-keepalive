@@ -1,7 +1,7 @@
 {
   "prompt": "Do not perform any work. Reply with exactly: OK",
   "models": {
-    "anthropic/claude-opus-*": { "interval": 50, "duration": 240 },
-    "openai/gpt-*": { "interval": 25, "duration": 240 }
+    "anthropic/claude-opus-*": { "interval": 50, "duration": 240, "sessions": "top" },
+    "openai/gpt-*": { "interval": 25, "duration": 240, "sessions": "all" }
   }
 }
