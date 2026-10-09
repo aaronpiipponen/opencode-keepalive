@@ -1,0 +1,14 @@
+{
+  "name": "opencode-keepalive",
+  "version": "0.1.0",
+  "description": "Per-model prompt-cache keepalive plugin for OpenCode v2",
+  "keywords": ["opencode", "opencode-plugin", "prompt-cache", "keepalive"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aaronpiipponen/opencode-keepalive.git"
+  },
+  "type": "module",
+  "main": "index.js",
+  "files": ["index.js", "config.example.json"]
+}
