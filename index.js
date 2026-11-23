@@ -285,7 +285,15 @@ export default {
       }
     }
 
-    if (!watchers.has(file)) {
+    // Replace a watcher left by an older load: its callback would keep running that load's config
+    // loader, which can drop fields this code reads.
+    if (watchers.has(file)) {
+      const previous = watchers.get(file)
+      clearTimeout(previous.timer)
+      previous.close()
+      watchers.delete(file)
+    }
+    {
       try {
         const watcher = watch(path.dirname(file), { persistent: false }, (_event, name) => {
           if (name && name !== path.basename(file)) return
