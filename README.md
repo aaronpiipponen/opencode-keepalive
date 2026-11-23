@@ -86,6 +86,34 @@ with no match is never warmed.
 Provider IDs are whatever your OpenCode setup uses (`opencode models` lists
 `provider/model` pairs).
 
+`directories` is optional. It maps a directory, absolute or starting with `~/`, to its own
+`models` map. A session whose directory is that directory or lies below it uses that map instead of
+the top-level `models`; when several listed directories hold the session, the deepest one wins. Every
+other session uses the top-level `models`. The same model can so be woken in one project and only
+warmed, or left alone, everywhere else:
+
+```json
+{
+  "prompt": "Do not perform any work. Reply with exactly: OK",
+  "models": {
+    "anthropic-sdk/claude-opus-*": { "maxPrompts": 5, "interval": 50 }
+  },
+  "directories": {
+    "~/projects/long-running": {
+      "models": {
+        "anthropic-sdk/claude-opus-*": { "maxPrompts": 60, "interval": 50, "wake": true, "prompt": "Continue." }
+      }
+    }
+  }
+}
+```
+
+A session's directory is read on every request, so a session moved to another directory follows
+that directory's rules from its next request.
+
+The plugin never fails a request: an error while scheduling a warm is logged to `logFile` and ends
+warming for that session, and an error while aligning a request leaves it unchanged.
+
 Saving the config file applies the new settings immediately. The plugin watches it, so a
 changed `enabled`, `maxPrompts`, `interval`, `prompt` or glob takes effect without a restart.
 An invalid file is rejected and the previous settings stay in effect, with the reason logged.

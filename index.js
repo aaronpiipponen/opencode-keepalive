@@ -24,6 +24,10 @@
 //     prompt    - optional per-rule message
 //     wake      - optional; when true the message is admitted into the chat and the model
 //                 runs, instead of a transient warm
+//   directories - optional; maps a directory (absolute or `~/`) to its own `models` map. A
+//                 session in that directory or below it uses that map instead of the top-level
+//                 `models`; the deepest listed directory wins. Every other session uses the
+//                 top-level `models`
 //
 // A spell starts at a genuine user prompt and lasts until `maxPrompts` prompts have been sent
 // (or the session is archived, removed, disabled, or unviewed past `idleTimeout`). A wake is a
@@ -34,6 +38,7 @@
 // A non-wake warm is a transient `session.generate`, so it does not touch history.
 
 import { appendFileSync, readFileSync, watch } from "node:fs"
+import { homedir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -63,27 +68,57 @@ function loadConfig(file) {
   if (raw.logFile !== undefined && (typeof raw.logFile !== "string" || !raw.logFile)) throw new Error(`${file}: "logFile" must be a non-empty path`)
   const logFile = raw.logFile === undefined ? undefined : path.resolve(path.dirname(file), raw.logFile)
 
-  const rules = Object.entries(raw.models ?? {}).map(([pattern, rule]) => {
-    if (!Number.isInteger(rule?.maxPrompts) || rule.maxPrompts < 1) throw new Error(`${file}: models["${pattern}"].maxPrompts must be a whole number of at least 1`)
-    if (!(rule?.interval > 0)) throw new Error(`${file}: models["${pattern}"].interval must be a positive number of minutes`)
-    const sessions = rule.sessions ?? "top"
-    if (!SESSION_KINDS.includes(sessions)) throw new Error(`${file}: models["${pattern}"].sessions must be one of ${SESSION_KINDS.join(", ")}`)
-    if (rule.prompt !== undefined && (typeof rule.prompt !== "string" || !rule.prompt)) throw new Error(`${file}: models["${pattern}"].prompt must be a non-empty string`)
-    if (rule.wake !== undefined && typeof rule.wake !== "boolean") throw new Error(`${file}: models["${pattern}"].wake must be true or false`)
-    if (rule.enabled !== undefined && typeof rule.enabled !== "boolean") throw new Error(`${file}: models["${pattern}"].enabled must be true or false`)
-    const source = pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")
-    return {
-      pattern,
-      regex: new RegExp(`^${source}$`),
-      enabled: rule.enabled !== false,
-      maxPrompts: rule.maxPrompts,
-      interval: rule.interval * MINUTE,
-      sessions,
-      prompt: rule.prompt ?? raw.prompt,
-      wake: rule.wake === true,
-    }
-  })
-  return { maxSessions, idleTimeout, autoTune, logFile, rules }
+  // `where` names the rule's place in the file, so an error points at the right map.
+  const parseRules = (models, where) =>
+    Object.entries(models ?? {}).map(([pattern, rule]) => {
+      const name = `${where}["${pattern}"]`
+      if (!Number.isInteger(rule?.maxPrompts) || rule.maxPrompts < 1) throw new Error(`${file}: ${name}.maxPrompts must be a whole number of at least 1`)
+      if (!(rule?.interval > 0)) throw new Error(`${file}: ${name}.interval must be a positive number of minutes`)
+      const sessions = rule.sessions ?? "top"
+      if (!SESSION_KINDS.includes(sessions)) throw new Error(`${file}: ${name}.sessions must be one of ${SESSION_KINDS.join(", ")}`)
+      if (rule.prompt !== undefined && (typeof rule.prompt !== "string" || !rule.prompt)) throw new Error(`${file}: ${name}.prompt must be a non-empty string`)
+      if (rule.wake !== undefined && typeof rule.wake !== "boolean") throw new Error(`${file}: ${name}.wake must be true or false`)
+      if (rule.enabled !== undefined && typeof rule.enabled !== "boolean") throw new Error(`${file}: ${name}.enabled must be true or false`)
+      const source = pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")
+      return {
+        // The directory is part of the key, so auto-tune keeps one interval per rule.
+        pattern: where === "models" ? pattern : `${where}:${pattern}`,
+        regex: new RegExp(`^${source}$`),
+        enabled: rule.enabled !== false,
+        maxPrompts: rule.maxPrompts,
+        interval: rule.interval * MINUTE,
+        sessions,
+        prompt: rule.prompt ?? raw.prompt,
+        wake: rule.wake === true,
+      }
+    })
+
+  const rules = parseRules(raw.models, "models")
+  if (raw.directories !== undefined && (typeof raw.directories !== "object" || raw.directories === null || Array.isArray(raw.directories))) {
+    throw new Error(`${file}: "directories" must map directories to rule maps`)
+  }
+  const directories = Object.entries(raw.directories ?? {})
+    .map(([directory, entry]) => {
+      if (!directory.startsWith("/") && directory !== "~" && !directory.startsWith("~/")) {
+        throw new Error(`${file}: directories["${directory}"] must be an absolute or ~/ path`)
+      }
+      if (typeof entry?.models !== "object" || entry.models === null) throw new Error(`${file}: directories["${directory}"].models must be a rule map`)
+      const expanded = directory === "~" ? homedir() : directory.startsWith("~/") ? path.join(homedir(), directory.slice(2)) : directory
+      return { segments: segmentsOf(expanded), rules: parseRules(entry.models, `directories["${directory}"].models`) }
+    })
+    // The deepest directory is tried first, so a nested entry overrides its parent.
+    .sort((a, b) => b.segments.length - a.segments.length)
+  return { maxSessions, idleTimeout, autoTune, logFile, rules, directories }
+}
+
+function segmentsOf(directory) {
+  return path.resolve(directory).split(path.sep).filter(Boolean)
+}
+
+// Whole path segments, so /projects-two never falls under a /projects entry.
+function contains(segments, directory) {
+  const target = segmentsOf(directory)
+  return segments.length <= target.length && segments.every((segment, index) => segment === target[index])
 }
 
 // The cache token counters are cumulative, so a warm's effect is the difference across it.
@@ -127,8 +162,10 @@ function applyPrefix(body, prefix) {
   return null
 }
 
-function ruleFor(config, model) {
-  return config.rules.find((r) => r.regex.test(model))
+// The rules of the deepest listed directory holding the session, else the top-level rules.
+function ruleFor(config, model, directory) {
+  const scoped = directory ? config.directories.find((entry) => contains(entry.segments, directory)) : undefined
+  return (scoped?.rules ?? config.rules).find((r) => r.regex.test(model))
 }
 
 function scopeAllows(rule, child) {
@@ -152,7 +189,9 @@ export default {
     const configs = (shared.configs ??= new Map()) // config file -> loaded config
     const watchers = (shared.watchers ??= new Map()) // config file -> directory watcher
 
-    if (!configs.has(file)) configs.set(file, loadConfig(file))
+    // Load the config on every plugin load: a config cached by an older load of this code can lack
+    // fields this code reads, and the reloaded plugin would fail on it.
+    configs.set(file, loadConfig(file))
     const current = () => configs.get(file)
 
     // OpenCode does not capture plugin console output, so reports go to `logFile` when set.
@@ -225,14 +264,14 @@ export default {
       }
     }
 
-    const admit = (sessionID, rule, model, child) => {
+    const admit = (sessionID, rule, model, child, directory) => {
       const config = current()
       if (!sessions.has(sessionID) && config.maxSessions > 0 && sessions.size >= config.maxSessions) {
         let oldest
         for (const entry of sessions) if (!oldest || entry[1].lastReal < oldest[1].lastReal) oldest = entry
         if (oldest) stop(oldest[0])
       }
-      arm(sessionID, rule, { lastReal: Date.now(), model, child })
+      arm(sessionID, rule, { lastReal: Date.now(), model, child, directory })
     }
 
     // Re-check every warmed session against the current config after a reload, so an edit that
@@ -240,7 +279,7 @@ export default {
     const reapply = () => {
       const config = current()
       for (const [sessionID, session] of [...sessions]) {
-        const rule = ruleFor(config, session.model)
+        const rule = ruleFor(config, session.model, session.directory)
         if (!rule || !rule.enabled || !scopeAllows(rule, session.child)) stop(sessionID)
         else arm(sessionID, rule, session)
       }
@@ -275,14 +314,27 @@ export default {
       spells.set(event.sessionID, 0)
     })
 
-    const registration = ctx.session.hook("context", async (event) => {
+    // The directory is read on every request, since a session can move to another directory.
+    const schedule = async (event) => {
       const model = `${event.model.providerID}/${event.model.id}`
-      const rule = ruleFor(current(), model)
+      const info = await ctx.session.get({ sessionID: event.sessionID })
+      const directory = info?.location?.directory
+      const rule = ruleFor(current(), model, directory)
       if (!rule || !rule.enabled) return stop(event.sessionID)
       if ((spells.get(event.sessionID) ?? 0) >= rule.maxPrompts) return stop(event.sessionID)
-      if (!isChild.has(event.sessionID)) isChild.set(event.sessionID, Boolean((await ctx.session.get({ sessionID: event.sessionID })).parentID))
+      if (!isChild.has(event.sessionID)) isChild.set(event.sessionID, Boolean(info?.parentID))
       if (!scopeAllows(rule, isChild.get(event.sessionID))) return
-      admit(event.sessionID, rule, model, isChild.get(event.sessionID))
+      admit(event.sessionID, rule, model, isChild.get(event.sessionID), directory)
+    }
+    // This hook runs inside every request. Warming is optional, so a failure here is logged and
+    // ends warming for the session; it must never fail the user's request.
+    const registration = ctx.session.hook("context", async (event) => {
+      try {
+        await schedule(event)
+      } catch (error) {
+        log(`keepalive: scheduling ${event.sessionID} failed, not warming it: ${error?.stack ?? error}`)
+        stop(event.sessionID)
+      }
     })
 
     // A warm built by session.generate can carry a different system prompt than the agent loop's
@@ -290,7 +342,7 @@ export default {
     // happens with the Anthropic provider plugin, which sets its prompt only through the `context`
     // hook, and the `context` hook does not run for the `generate` kind. Send the last real
     // request's system prefix on every warm, for whichever shape the provider uses.
-    const httpRegistration = ctx.session.hook("http.request", async (event) => {
+    const align = async (event) => {
       if (!sessions.has(event.sessionID) || (event.kind !== "primary" && event.kind !== "generate")) return
       const body = await event.request.clone().json()
       const prefix = systemPrefix(body)
@@ -303,6 +355,14 @@ export default {
       const headers = new Headers(event.request.headers)
       headers.delete("content-length")
       event.request = new Request(event.request.url, { method: event.request.method, headers, body: JSON.stringify(aligned) })
+    }
+    // A failed alignment leaves the request as it was; only the warm's cache reuse suffers.
+    const httpRegistration = ctx.session.hook("http.request", async (event) => {
+      try {
+        await align(event)
+      } catch (error) {
+        log(`keepalive: aligning a request of ${event.sessionID} failed, sent unchanged: ${error?.stack ?? error}`)
+      }
     })
 
     return async () => {

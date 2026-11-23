@@ -291,5 +291,69 @@ function same(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
   check("identical prefix is a no-op", same(got, g))
 }
 
+// --- directories -------------------------------------------------------------
+
+{
+  const config = {
+    prompt: "P",
+    models: { "p/*": { maxPrompts: 100, interval: 0.002 } },
+    directories: {
+      "/work/a": { models: { "p/*": { maxPrompts: 100, interval: 0.002, wake: true, prompt: "WAKE A" } } },
+      "/work/a/inner": { models: {} },
+    },
+  }
+  const where = { s1: "/work/a/plan", s2: "/work/b", s3: "/work/a/inner/x", s4: "/work/a-two" }
+  const m = await mount(config, { get: (sessionID) => ({ location: { directory: where[sessionID] } }) })
+  for (const sessionID of Object.keys(where)) await arm(m.hooks, sessionID, ["p", "m"])
+  await sleep(200)
+  await m.cleanup()
+  const prompted = new Set(m.calls.prompt.map((call) => call.sessionID))
+  const generated = new Set(m.calls.generate.map((call) => call.sessionID))
+  check("a listed directory's rules apply below it", prompted.has("s1") && !generated.has("s1"))
+  check("the directory's own prompt is sent", m.calls.prompt.some((call) => call.sessionID === "s1" && call.text === "WAKE A"))
+  check("other directories use the top-level rules", generated.has("s2") && !prompted.has("s2"))
+  check("the deepest listed directory wins", !prompted.has("s3") && !generated.has("s3"))
+  check("a sibling sharing the prefix is not inside", generated.has("s4") && !prompted.has("s4"))
+}
+{
+  let threw = false
+  try { await mount({ prompt: "P", models: {}, directories: { "relative/dir": { models: {} } } }) } catch { threw = true }
+  check("rejects a relative directory", threw)
+}
+
+// --- robustness inside requests -------------------------------------------------
+
+{
+  // A reload keeps the previous load's state; an older load cached its config without fields
+  // this code reads. Setup must load the config afresh instead of reusing that copy.
+  const { setup, file } = await load({ prompt: "P", models: { "p/*": { maxPrompts: 100, interval: 0.002 } } })
+  globalThis[STATE] = { configs: new Map([[file, { maxSessions: 0, idleTimeout: 0, autoTune: false, rules: [] }]]) }
+  const hooks = {}
+  const calls = []
+  const cleanup = setup({
+    options: { config: file },
+    session: {
+      hook: async (name, cb) => { hooks[name] = cb; return { dispose: async () => {} } },
+      get: async () => ({ time: {}, tokens: {}, location: { directory: "/x" } }),
+      generate: async (a) => { calls.push(a) },
+      prompt: async () => {},
+    },
+  })
+  let threw = false
+  try { await arm(hooks, "s1", ["p", "m"]) } catch { threw = true }
+  await sleep(300)
+  await (await cleanup)()
+  check("a config cached by an older load does not break requests", !threw && calls.length > 0)
+}
+{
+  const m = await mount({ prompt: "P", models: { "*": { maxPrompts: 100, interval: 0.002 } } }, { get: () => { throw new Error("lookup failed") } })
+  let threw = false
+  try { await arm(m.hooks, "s1", ["p", "m"]) } catch { threw = true }
+  await sleep(100)
+  await m.cleanup()
+  check("a failing session lookup never fails the request", !threw && m.calls.generate.length === 0)
+  check("the failure is logged", m.logs().includes("scheduling s1 failed"))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
