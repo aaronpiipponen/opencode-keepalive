@@ -230,7 +230,7 @@ export default {
       try {
         info = await ctx.session.get({ sessionID })
       } catch (error) {
-        log(`keepalive: ${sessionID} not found, no longer warming it:`, error)
+        log(`keepalive: ${sessionID} not found, no longer warming it: ${error}`)
         return stop(sessionID)
       }
       if (info.time.archived) return stop(sessionID)
@@ -246,7 +246,7 @@ export default {
         if (rule.wake) await ctx.session.prompt({ sessionID, text: rule.prompt, metadata: WAKE_METADATA })
         else await ctx.session.generate({ sessionID, prompt: rule.prompt })
       } catch (error) {
-        log(`keepalive: warm of ${sessionID} failed:`, error)
+        log(`keepalive: warm of ${sessionID} failed: ${error}`)
       }
       // Count this prompt against the spell before the wake's own turn can re-arm.
       spells.set(sessionID, (spells.get(sessionID) ?? 0) + 1)
@@ -302,7 +302,7 @@ export default {
             try {
               configs.set(file, loadConfig(file))
             } catch (error) {
-              log(`keepalive: config reload failed, keeping the previous settings:`, error)
+              log(`keepalive: config reload failed, keeping the previous settings: ${error}`)
               return
             }
             log(`keepalive: config reloaded (${configs.get(file).rules.length} rules)`)
@@ -311,7 +311,7 @@ export default {
         })
         watchers.set(file, watcher)
       } catch (error) {
-        log(`keepalive: could not watch ${file} for changes:`, error)
+        log(`keepalive: could not watch ${file} for changes: ${error}`)
       }
     }
 
